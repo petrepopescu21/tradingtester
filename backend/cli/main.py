@@ -1,0 +1,281 @@
+"""Command-line interface for Trading Tester."""
+
+import json
+import sys
+from pathlib import Path
+from datetime import datetime
+from typing import Optional
+
+import click
+from rich.console import Console
+from rich.table import Table
+from rich import print as rprint
+
+from backend.strategy_parser.parser import StrategyParser
+from backend.llm.client import ClaudeClient
+from backend.code_generator.generator import CodeGenerator
+from backend.data.fetcher import DataFetcher
+from backend.backtester.engine import BacktestEngine
+
+console = Console()
+
+
+@click.group()
+@click.version_option(version="0.1.0")
+def cli():
+    """Trading Tester - LLM-powered trading strategy testing framework."""
+    pass
+
+
+@cli.command()
+@click.argument('strategy_file', type=click.Path(exists=True))
+@click.option('--symbol', '-s', default='AAPL', help='Trading symbol to test')
+@click.option('--start', default='2020-01-01', help='Start date (YYYY-MM-DD)')
+@click.option('--end', default='2023-12-31', help='End date (YYYY-MM-DD)')
+@click.option('--output', '-o', type=click.Path(), help='Output JSON file for results')
+@click.option('--no-cache', is_flag=True, help='Disable data caching')
+def test(
+    strategy_file: str,
+    symbol: str,
+    start: str,
+    end: str,
+    output: Optional[str],
+    no_cache: bool
+):
+    """Test a single trading strategy."""
+    console.print(f"\n[bold blue]Testing strategy: {strategy_file}[/bold blue]\n")
+
+    try:
+        # Parse strategy
+        console.print("[yellow]1. Parsing strategy...[/yellow]")
+        parser = StrategyParser()
+        strategy = parser.parse_file(strategy_file)
+        console.print(f"   Strategy: [green]{strategy.name}[/green]")
+
+        # Generate code
+        console.print("\n[yellow]2. Generating code with Claude...[/yellow]")
+        generator = CodeGenerator()
+        class_name, code = generator.generate(strategy, validate=True)
+        console.print(f"   Generated class: [green]{class_name}[/green]")
+
+        # Execute code to get strategy class
+        console.print("\n[yellow]3. Loading strategy code...[/yellow]")
+        namespace = {}
+        exec(code, namespace)
+        strategy_class = namespace.get(class_name)
+
+        if not strategy_class:
+            console.print(f"[red]Error: Could not find class {class_name} in generated code[/red]")
+            sys.exit(1)
+
+        strategy_instance = strategy_class(strategy.name)
+        console.print("   [green]Strategy loaded successfully[/green]")
+
+        # Fetch data
+        console.print(f"\n[yellow]4. Fetching data for {symbol} ({start} to {end})...[/yellow]")
+        fetcher = DataFetcher()
+        data = fetcher.fetch(symbol, start, end, use_cache=not no_cache)
+        console.print(f"   Fetched [green]{len(data)}[/green] data points")
+
+        # Run backtest
+        console.print("\n[yellow]5. Running backtest...[/yellow]")
+        engine = BacktestEngine()
+        result = engine.run(strategy_instance, data, symbol)
+
+        # Display results
+        _display_results(result)
+
+        # Save to file
+        if output:
+            output_path = Path(output)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(output_path, 'w') as f:
+                json.dump(result.to_dict(), f, indent=2)
+            console.print(f"\n[green]Results saved to {output}[/green]")
+
+    except Exception as e:
+        console.print(f"\n[red]Error: {str(e)}[/red]")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
+@cli.command()
+@click.argument('strategy_file', type=click.Path(exists=True))
+@click.option('--variations', '-n', default=3, help='Number of variations to generate')
+@click.option('--output-dir', '-o', type=click.Path(), default='generated', help='Output directory')
+def generate(strategy_file: str, variations: int, output_dir: str):
+    """Generate variations of a trading strategy."""
+    console.print(f"\n[bold blue]Generating {variations} variations of: {strategy_file}[/bold blue]\n")
+
+    try:
+        # Parse original strategy
+        parser = StrategyParser()
+        strategy = parser.parse_file(strategy_file)
+        console.print(f"Original strategy: [green]{strategy.name}[/green]")
+
+        # Generate variations
+        console.print(f"\n[yellow]Generating {variations} variations with Claude...[/yellow]")
+        client = ClaudeClient()
+        variation_contents = client.generate_variations(strategy.raw_content, variations)
+
+        console.print(f"[green]Generated {len(variation_contents)} variations[/green]\n")
+
+        # Save variations
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+
+        for i, content in enumerate(variation_contents, 1):
+            # Parse to get name
+            try:
+                var_strategy = parser.parse(content)
+                filename = f"{var_strategy.name.lower().replace(' ', '_')}_v{i}.md"
+            except Exception:
+                filename = f"variation_{i}.md"
+
+            file_path = output_path / filename
+            file_path.write_text(content, encoding='utf-8')
+            console.print(f"   Saved: [green]{file_path}[/green]")
+
+        console.print(f"\n[bold green]✓ Generated {len(variation_contents)} variations in {output_dir}[/bold green]")
+
+    except Exception as e:
+        console.print(f"\n[red]Error: {str(e)}[/red]")
+        sys.exit(1)
+
+
+@cli.command()
+@click.argument('strategy_dir', type=click.Path(exists=True))
+@click.option('--symbols', '-s', default='AAPL,MSFT,GOOGL', help='Comma-separated symbols')
+@click.option('--start', default='2020-01-01', help='Start date (YYYY-MM-DD)')
+@click.option('--end', default='2023-12-31', help='End date (YYYY-MM-DD)')
+@click.option('--output-dir', '-o', type=click.Path(), default='reports', help='Output directory')
+def batch(strategy_dir: str, symbols: str, start: str, end: str, output_dir: str):
+    """Batch test multiple strategies on multiple symbols."""
+    console.print(f"\n[bold blue]Batch testing strategies in: {strategy_dir}[/bold blue]\n")
+
+    symbol_list = [s.strip() for s in symbols.split(',')]
+    strategy_files = list(Path(strategy_dir).glob('*.md'))
+
+    console.print(f"Strategies: {len(strategy_files)}")
+    console.print(f"Symbols: {', '.join(symbol_list)}")
+    console.print(f"Period: {start} to {end}\n")
+
+    results_summary = []
+
+    for strategy_file in strategy_files:
+        console.print(f"\n[bold]Testing: {strategy_file.name}[/bold]")
+
+        try:
+            # Parse and generate code
+            parser = StrategyParser()
+            strategy = parser.parse_file(strategy_file)
+
+            generator = CodeGenerator()
+            class_name, code = generator.generate(strategy, validate=True)
+
+            namespace = {}
+            exec(code, namespace)
+            strategy_class = namespace.get(class_name)
+
+            if not strategy_class:
+                console.print(f"[red]  Skipping: Could not load class {class_name}[/red]")
+                continue
+
+            # Test on each symbol
+            for symbol in symbol_list:
+                console.print(f"  Testing {symbol}...")
+
+                try:
+                    strategy_instance = strategy_class(strategy.name)
+
+                    fetcher = DataFetcher()
+                    data = fetcher.fetch(symbol, start, end)
+
+                    engine = BacktestEngine()
+                    result = engine.run(strategy_instance, data, symbol)
+
+                    results_summary.append({
+                        "strategy": strategy.name,
+                        "symbol": symbol,
+                        "return_pct": result.total_return_pct,
+                        "sharpe_ratio": result.sharpe_ratio,
+                        "num_trades": result.num_trades,
+                        "win_rate": result.win_rate
+                    })
+
+                    # Save individual result
+                    output_path = Path(output_dir)
+                    output_path.mkdir(parents=True, exist_ok=True)
+                    result_file = output_path / f"{strategy.name.replace(' ', '_')}_{symbol}.json"
+
+                    with open(result_file, 'w') as f:
+                        json.dump(result.to_dict(), f, indent=2)
+
+                    console.print(f"    Return: [green]{result.total_return_pct:.2f}%[/green], "
+                                f"Sharpe: {result.sharpe_ratio:.2f}, Trades: {result.num_trades}")
+
+                except Exception as e:
+                    console.print(f"    [red]Error: {str(e)}[/red]")
+
+        except Exception as e:
+            console.print(f"[red]  Error loading strategy: {str(e)}[/red]")
+
+    # Display summary
+    if results_summary:
+        console.print("\n[bold]Summary of Results:[/bold]\n")
+        table = Table()
+        table.add_column("Strategy")
+        table.add_column("Symbol")
+        table.add_column("Return %", justify="right")
+        table.add_column("Sharpe", justify="right")
+        table.add_column("Trades", justify="right")
+        table.add_column("Win Rate", justify="right")
+
+        for r in results_summary:
+            table.add_row(
+                r["strategy"],
+                r["symbol"],
+                f"{r['return_pct']:.2f}%",
+                f"{r['sharpe_ratio']:.2f}",
+                str(r["num_trades"]),
+                f"{r['win_rate']*100:.1f}%"
+            )
+
+        console.print(table)
+
+        # Save summary
+        summary_file = Path(output_dir) / f"summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        with open(summary_file, 'w') as f:
+            json.dump(results_summary, f, indent=2)
+        console.print(f"\n[green]Summary saved to {summary_file}[/green]")
+
+
+def _display_results(result):
+    """Display backtest results in a nice format."""
+    console.print("\n[bold]Backtest Results:[/bold]\n")
+
+    table = Table(show_header=False)
+    table.add_column("Metric", style="cyan")
+    table.add_column("Value", style="green")
+
+    table.add_row("Strategy", result.strategy_name)
+    table.add_row("Symbol", result.symbol)
+    table.add_row("Period", f"{result.start_date} to {result.end_date}")
+    table.add_row("Initial Capital", f"${result.initial_capital:,.2f}")
+    table.add_row("Final Capital", f"${result.final_capital:,.2f}")
+    table.add_row("Total Return", f"${result.total_return:,.2f} ({result.total_return_pct:.2f}%)")
+    table.add_row("Number of Trades", str(result.num_trades))
+    table.add_row("Winning Trades", str(result.winning_trades))
+    table.add_row("Losing Trades", str(result.losing_trades))
+    table.add_row("Win Rate", f"{result.win_rate * 100:.2f}%")
+    table.add_row("Average Win", f"${result.avg_win:,.2f}")
+    table.add_row("Average Loss", f"${result.avg_loss:,.2f}")
+    table.add_row("Max Drawdown", f"${result.max_drawdown:,.2f} ({result.max_drawdown_pct:.2f}%)")
+    table.add_row("Sharpe Ratio", f"{result.sharpe_ratio:.3f}")
+
+    console.print(table)
+
+
+if __name__ == '__main__':
+    cli()
