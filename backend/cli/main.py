@@ -29,6 +29,7 @@ def cli():
 @click.option('--symbol', '-s', default='AAPL', help='Trading symbol to test')
 @click.option('--start', default='2020-01-01', help='Start date (YYYY-MM-DD)')
 @click.option('--end', default='2023-12-31', help='End date (YYYY-MM-DD)')
+@click.option('--interval', '-i', default='1d', help='Data interval (1m, 5m, 15m, 1h, 4h, 1d)')
 @click.option('--output', '-o', type=click.Path(), help='Output JSON file for results')
 @click.option('--no-cache', is_flag=True, help='Disable data caching')
 def test(
@@ -36,6 +37,7 @@ def test(
     symbol: str,
     start: str,
     end: str,
+    interval: str,
     output: Optional[str],
     no_cache: bool
 ):
@@ -70,9 +72,9 @@ def test(
         console.print("   [green]Strategy loaded successfully[/green]")
 
         # Fetch data
-        console.print(f"\n[yellow]2. Fetching data for {symbol} ({start} to {end})...[/yellow]")
+        console.print(f"\n[yellow]2. Fetching data for {symbol} ({start} to {end}, {interval})...[/yellow]")
         fetcher = DataFetcher()
-        data = fetcher.fetch(symbol, start, end, use_cache=not no_cache)
+        data = fetcher.fetch(symbol, start, end, interval=interval, use_cache=not no_cache)
         console.print(f"   Fetched [green]{len(data)}[/green] data points")
 
         # Run backtest

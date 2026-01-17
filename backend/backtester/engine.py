@@ -117,6 +117,7 @@ class BacktestEngine:
         position_entry_price = 0.0
         position_entry_date = None
         position_type = None
+        position_leverage = 1.0
 
         trades = []
         equity_curve = []
@@ -151,11 +152,19 @@ class BacktestEngine:
                     commission_cost = trade_value * self.commission
 
                     if position_type == "LONG":
-                        cash += trade_value - commission_cost
-                        pnl = trade_value - (position_size * position_entry_price)
+                        # P&L with leverage: (exit - entry) * size * leverage
+                        raw_pnl = (current_price - position_entry_price) * position_size
+                        leveraged_pnl = raw_pnl * position_leverage
+                        # For leveraged positions, we only used margin (trade_value / leverage)
+                        margin_used = (position_size * position_entry_price) / position_leverage
+                        cash += margin_used + leveraged_pnl - commission_cost
+                        pnl = leveraged_pnl
                     else:  # SHORT
-                        cash += (position_size * position_entry_price * 2) - trade_value - commission_cost
-                        pnl = (position_size * position_entry_price) - trade_value
+                        raw_pnl = (position_entry_price - current_price) * position_size
+                        leveraged_pnl = raw_pnl * position_leverage
+                        margin_used = (position_size * position_entry_price) / position_leverage
+                        cash += margin_used + leveraged_pnl - commission_cost
+                        pnl = leveraged_pnl
 
                     pnl -= commission_cost  # Account for entry commission too
 
@@ -166,8 +175,9 @@ class BacktestEngine:
                         "entry_price": position_entry_price,
                         "exit_price": current_price,
                         "size": position_size,
+                        "leverage": position_leverage,
                         "pnl": pnl,
-                        "pnl_pct": (pnl / (position_size * position_entry_price)) * 100,
+                        "pnl_pct": (pnl / margin_used) * 100 if margin_used > 0 else 0,
                         "days_held": days_held
                     })
 
@@ -177,10 +187,14 @@ class BacktestEngine:
                     position_entry_price = 0.0
                     position_entry_date = None
                     position_type = None
+                    position_leverage = 1.0
 
             # Check for new entry signal
             if position_size == 0 and 'signal' in row and row['signal'] != 0:
                 signal = row['signal']
+
+                # Get leverage from strategy
+                leverage = strategy.get_leverage(data.iloc[:i+1])
 
                 # Calculate position size
                 size = strategy.calculate_position_size(
@@ -192,16 +206,19 @@ class BacktestEngine:
 
                 if size > 0:
                     trade_value = size * current_price
+                    # With leverage, we only need margin = trade_value / leverage
+                    margin_required = trade_value / leverage
                     commission_cost = trade_value * self.commission
 
-                    # Check if we have enough cash
-                    if cash >= trade_value + commission_cost:
-                        # Enter position
-                        cash -= trade_value + commission_cost
+                    # Check if we have enough cash for margin
+                    if cash >= margin_required + commission_cost:
+                        # Enter position (only deduct margin, not full trade value)
+                        cash -= margin_required + commission_cost
                         position_size = size
                         position_entry_price = current_price
                         position_entry_date = date
                         position_type = "LONG" if signal > 0 else "SHORT"
+                        position_leverage = leverage
 
                         strategy.open_position(
                             symbol=symbol,
@@ -211,22 +228,33 @@ class BacktestEngine:
                             position_type=position_type
                         )
 
-            # Record equity
-            portfolio_value = cash + (position_size * current_price if position_size != 0 else 0)
+            # Record equity (account for leveraged position value)
+            if position_size != 0:
+                margin_in_position = (position_size * position_entry_price) / position_leverage
+                if position_type == "LONG":
+                    unrealized_pnl = (current_price - position_entry_price) * position_size * position_leverage
+                else:
+                    unrealized_pnl = (position_entry_price - current_price) * position_size * position_leverage
+                portfolio_value = cash + margin_in_position + unrealized_pnl
+            else:
+                portfolio_value = cash
             equity_curve.append(portfolio_value)
 
         # Close any remaining position
         if position_size != 0:
             final_price = data.iloc[-1]['close']
             final_date = data.index[-1]
-            trade_value = position_size * final_price
 
             if position_type == "LONG":
-                cash += trade_value
-                pnl = trade_value - (position_size * position_entry_price)
+                raw_pnl = (final_price - position_entry_price) * position_size
+                leveraged_pnl = raw_pnl * position_leverage
             else:
-                cash += (position_size * position_entry_price * 2) - trade_value
-                pnl = (position_size * position_entry_price) - trade_value
+                raw_pnl = (position_entry_price - final_price) * position_size
+                leveraged_pnl = raw_pnl * position_leverage
+
+            margin_used = (position_size * position_entry_price) / position_leverage
+            cash += margin_used + leveraged_pnl
+            pnl = leveraged_pnl
 
             days_held = (final_date - position_entry_date).days if position_entry_date else 0
 
@@ -237,8 +265,9 @@ class BacktestEngine:
                 "entry_price": position_entry_price,
                 "exit_price": final_price,
                 "size": position_size,
+                "leverage": position_leverage,
                 "pnl": pnl,
-                "pnl_pct": (pnl / (position_size * position_entry_price)) * 100,
+                "pnl_pct": (pnl / margin_used) * 100 if margin_used > 0 else 0,
                 "days_held": days_held
             })
 

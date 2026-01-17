@@ -3,22 +3,28 @@
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Literal
 
 import pandas as pd
 import yfinance as yf
 from dotenv import load_dotenv
 
+from .binance_fetcher import BinanceFetcher
+
+
+DataProvider = Literal["yfinance", "binance"]
+
 
 class DataFetcher:
     """Fetch and cache historical market data."""
 
-    def __init__(self, cache_dir: Optional[str] = None):
+    def __init__(self, cache_dir: Optional[str] = None, provider: DataProvider = "yfinance"):
         """
         Initialize data fetcher.
 
         Args:
             cache_dir: Directory for caching data (defaults to env var or './data_cache')
+            provider: Data provider ('yfinance' or 'binance')
         """
         load_dotenv()
 
@@ -26,6 +32,13 @@ class DataFetcher:
             cache_dir or os.getenv("DATA_CACHE_DIR", "./data_cache")
         )
         self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.provider = provider
+
+        # Initialize Binance fetcher if needed
+        if provider == "binance":
+            self._binance = BinanceFetcher(cache_dir=str(self.cache_dir))
+        else:
+            self._binance = None
 
     def fetch(
         self,
@@ -39,18 +52,41 @@ class DataFetcher:
         Fetch historical data for a symbol.
 
         Args:
-            symbol: Trading symbol (e.g., 'AAPL', 'SPY')
+            symbol: Trading symbol (e.g., 'AAPL', 'BTCUSDT')
             start_date: Start date (YYYY-MM-DD or datetime)
             end_date: End date (YYYY-MM-DD or datetime)
-            interval: Data interval (1d, 1h, etc.)
+            interval: Data interval (1m, 5m, 15m, 1h, 1d, etc.)
             use_cache: Whether to use cached data
 
         Returns:
-            DataFrame with columns: Open, High, Low, Close, Volume, Adj Close
+            DataFrame with columns: open, high, low, close, volume
 
         Raises:
             ValueError: If data fetch fails
         """
+        # Use Binance for crypto or if explicitly set
+        if self.provider == "binance" or self._is_crypto_symbol(symbol):
+            if self._binance is None:
+                self._binance = BinanceFetcher(cache_dir=str(self.cache_dir))
+            return self._binance.fetch(symbol, start_date, end_date, interval, use_cache)
+
+        # Use yfinance for stocks
+        return self._fetch_yfinance(symbol, start_date, end_date, interval, use_cache)
+
+    def _is_crypto_symbol(self, symbol: str) -> bool:
+        """Check if symbol is a crypto pair."""
+        crypto_patterns = ['USDT', 'BUSD', 'BTC/', 'ETH/', 'SOL/', '-USD']
+        return any(p in symbol.upper() for p in crypto_patterns)
+
+    def _fetch_yfinance(
+        self,
+        symbol: str,
+        start_date: str | datetime,
+        end_date: str | datetime,
+        interval: str = "1d",
+        use_cache: bool = True
+    ) -> pd.DataFrame:
+        """Fetch data from yfinance."""
         # Convert dates to strings
         if isinstance(start_date, datetime):
             start_date = start_date.strftime("%Y-%m-%d")
