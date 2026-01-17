@@ -1,6 +1,7 @@
 """Command-line interface for Trading Tester."""
 
 import json
+import re
 import sys
 from pathlib import Path
 from datetime import datetime
@@ -9,11 +10,7 @@ from typing import Optional
 import click
 from rich.console import Console
 from rich.table import Table
-from rich import print as rprint
 
-from backend.strategy_parser.parser import StrategyParser
-from backend.llm.client import ClaudeClient
-from backend.code_generator.generator import CodeGenerator
 from backend.data.fetcher import DataFetcher
 from backend.backtester.engine import BacktestEngine
 
@@ -28,57 +25,58 @@ def cli():
 
 
 @cli.command()
-@click.argument('strategy_file', type=click.Path(exists=True))
+@click.argument('code_file', type=click.Path(exists=True))
 @click.option('--symbol', '-s', default='AAPL', help='Trading symbol to test')
 @click.option('--start', default='2020-01-01', help='Start date (YYYY-MM-DD)')
 @click.option('--end', default='2023-12-31', help='End date (YYYY-MM-DD)')
 @click.option('--output', '-o', type=click.Path(), help='Output JSON file for results')
 @click.option('--no-cache', is_flag=True, help='Disable data caching')
 def test(
-    strategy_file: str,
+    code_file: str,
     symbol: str,
     start: str,
     end: str,
     output: Optional[str],
     no_cache: bool
 ):
-    """Test a single trading strategy."""
-    console.print(f"\n[bold blue]Testing strategy: {strategy_file}[/bold blue]\n")
+    """Test a generated strategy Python file."""
+    console.print(f"\n[bold blue]Testing: {code_file}[/bold blue]\n")
 
     try:
-        # Parse strategy
-        console.print("[yellow]1. Parsing strategy...[/yellow]")
-        parser = StrategyParser()
-        strategy = parser.parse_file(strategy_file)
-        console.print(f"   Strategy: [green]{strategy.name}[/green]")
+        # Load code
+        console.print("[yellow]1. Loading strategy code...[/yellow]")
+        code_path = Path(code_file)
+        code = code_path.read_text(encoding='utf-8')
 
-        # Generate code
-        console.print("\n[yellow]2. Generating code with Claude...[/yellow]")
-        generator = CodeGenerator()
-        class_name, code = generator.generate(strategy, validate=True)
-        console.print(f"   Generated class: [green]{class_name}[/green]")
+        # Find class name
+        match = re.search(r'class\s+(\w+)\s*\([^)]*Strategy[^)]*\)', code)
+        if not match:
+            console.print("[red]Error: Could not find Strategy class in file[/red]")
+            sys.exit(1)
 
-        # Execute code to get strategy class
-        console.print("\n[yellow]3. Loading strategy code...[/yellow]")
+        class_name = match.group(1)
+        console.print(f"   Found class: [green]{class_name}[/green]")
+
+        # Execute code
         namespace = {}
         exec(code, namespace)
         strategy_class = namespace.get(class_name)
 
         if not strategy_class:
-            console.print(f"[red]Error: Could not find class {class_name} in generated code[/red]")
+            console.print(f"[red]Error: Could not load class {class_name}[/red]")
             sys.exit(1)
 
-        strategy_instance = strategy_class(strategy.name)
+        strategy_instance = strategy_class()
         console.print("   [green]Strategy loaded successfully[/green]")
 
         # Fetch data
-        console.print(f"\n[yellow]4. Fetching data for {symbol} ({start} to {end})...[/yellow]")
+        console.print(f"\n[yellow]2. Fetching data for {symbol} ({start} to {end})...[/yellow]")
         fetcher = DataFetcher()
         data = fetcher.fetch(symbol, start, end, use_cache=not no_cache)
         console.print(f"   Fetched [green]{len(data)}[/green] data points")
 
         # Run backtest
-        console.print("\n[yellow]5. Running backtest...[/yellow]")
+        console.print("\n[yellow]3. Running backtest...[/yellow]")
         engine = BacktestEngine()
         result = engine.run(strategy_instance, data, symbol)
 
@@ -101,61 +99,17 @@ def test(
 
 
 @cli.command()
-@click.argument('strategy_file', type=click.Path(exists=True))
-@click.option('--variations', '-n', default=3, help='Number of variations to generate')
-@click.option('--output-dir', '-o', type=click.Path(), default='generated', help='Output directory')
-def generate(strategy_file: str, variations: int, output_dir: str):
-    """Generate variations of a trading strategy."""
-    console.print(f"\n[bold blue]Generating {variations} variations of: {strategy_file}[/bold blue]\n")
-
-    try:
-        # Parse original strategy
-        parser = StrategyParser()
-        strategy = parser.parse_file(strategy_file)
-        console.print(f"Original strategy: [green]{strategy.name}[/green]")
-
-        # Generate variations
-        console.print(f"\n[yellow]Generating {variations} variations with Claude...[/yellow]")
-        client = ClaudeClient()
-        variation_contents = client.generate_variations(strategy.raw_content, variations)
-
-        console.print(f"[green]Generated {len(variation_contents)} variations[/green]\n")
-
-        # Save variations
-        output_path = Path(output_dir)
-        output_path.mkdir(parents=True, exist_ok=True)
-
-        for i, content in enumerate(variation_contents, 1):
-            # Parse to get name
-            try:
-                var_strategy = parser.parse(content)
-                filename = f"{var_strategy.name.lower().replace(' ', '_')}_v{i}.md"
-            except Exception:
-                filename = f"variation_{i}.md"
-
-            file_path = output_path / filename
-            file_path.write_text(content, encoding='utf-8')
-            console.print(f"   Saved: [green]{file_path}[/green]")
-
-        console.print(f"\n[bold green]✓ Generated {len(variation_contents)} variations in {output_dir}[/bold green]")
-
-    except Exception as e:
-        console.print(f"\n[red]Error: {str(e)}[/red]")
-        sys.exit(1)
-
-
-@cli.command()
-@click.argument('strategy_dir', type=click.Path(exists=True))
+@click.argument('code_dir', type=click.Path(exists=True))
 @click.option('--symbols', '-s', default='AAPL,MSFT,GOOGL', help='Comma-separated symbols')
 @click.option('--start', default='2020-01-01', help='Start date (YYYY-MM-DD)')
 @click.option('--end', default='2023-12-31', help='End date (YYYY-MM-DD)')
 @click.option('--output-dir', '-o', type=click.Path(), default='reports', help='Output directory')
-def batch(strategy_dir: str, symbols: str, start: str, end: str, output_dir: str):
-    """Batch test multiple strategies on multiple symbols."""
-    console.print(f"\n[bold blue]Batch testing strategies in: {strategy_dir}[/bold blue]\n")
+def batch(code_dir: str, symbols: str, start: str, end: str, output_dir: str):
+    """Batch test multiple generated strategy files."""
+    console.print(f"\n[bold blue]Batch testing strategies in: {code_dir}[/bold blue]\n")
 
     symbol_list = [s.strip() for s in symbols.split(',')]
-    strategy_files = list(Path(strategy_dir).glob('*.md'))
+    strategy_files = list(Path(code_dir).glob('*.py'))
 
     console.print(f"Strategies: {len(strategy_files)}")
     console.print(f"Symbols: {', '.join(symbol_list)}")
@@ -163,16 +117,19 @@ def batch(strategy_dir: str, symbols: str, start: str, end: str, output_dir: str
 
     results_summary = []
 
-    for strategy_file in strategy_files:
-        console.print(f"\n[bold]Testing: {strategy_file.name}[/bold]")
+    for code_file in strategy_files:
+        console.print(f"\n[bold]Testing: {code_file.name}[/bold]")
 
         try:
-            # Parse and generate code
-            parser = StrategyParser()
-            strategy = parser.parse_file(strategy_file)
+            code = code_file.read_text(encoding='utf-8')
 
-            generator = CodeGenerator()
-            class_name, code = generator.generate(strategy, validate=True)
+            # Find class name
+            match = re.search(r'class\s+(\w+)\s*\([^)]*Strategy[^)]*\)', code)
+            if not match:
+                console.print(f"[red]  Skipping: No Strategy class found[/red]")
+                continue
+
+            class_name = match.group(1)
 
             namespace = {}
             exec(code, namespace)
@@ -187,7 +144,7 @@ def batch(strategy_dir: str, symbols: str, start: str, end: str, output_dir: str
                 console.print(f"  Testing {symbol}...")
 
                 try:
-                    strategy_instance = strategy_class(strategy.name)
+                    strategy_instance = strategy_class()
 
                     fetcher = DataFetcher()
                     data = fetcher.fetch(symbol, start, end)
@@ -196,7 +153,8 @@ def batch(strategy_dir: str, symbols: str, start: str, end: str, output_dir: str
                     result = engine.run(strategy_instance, data, symbol)
 
                     results_summary.append({
-                        "strategy": strategy.name,
+                        "strategy": result.strategy_name,
+                        "file": code_file.name,
                         "symbol": symbol,
                         "return_pct": result.total_return_pct,
                         "sharpe_ratio": result.sharpe_ratio,
@@ -207,7 +165,7 @@ def batch(strategy_dir: str, symbols: str, start: str, end: str, output_dir: str
                     # Save individual result
                     output_path = Path(output_dir)
                     output_path.mkdir(parents=True, exist_ok=True)
-                    result_file = output_path / f"{strategy.name.replace(' ', '_')}_{symbol}.json"
+                    result_file = output_path / f"{code_file.stem}_{symbol}.json"
 
                     with open(result_file, 'w') as f:
                         json.dump(result.to_dict(), f, indent=2)
