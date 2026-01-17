@@ -17,6 +17,9 @@ class Strategy(ABC):
         """
         self.name = name
         self.positions: dict[str, dict] = {}  # symbol -> {entry_price, size, entry_date}
+        self.trailing_stops: dict[str, dict] = {}  # symbol -> {stop_price, highest_price, activated}
+        self.leverage: float = 1.0  # Default no leverage
+        self.asset_class: str = "equity"  # equity, crypto, futures
 
     @abstractmethod
     def calculate_indicators(self, data: pd.DataFrame) -> pd.DataFrame:
@@ -123,3 +126,106 @@ class Strategy(ABC):
         """Record closing a position."""
         if symbol in self.positions:
             del self.positions[symbol]
+        if symbol in self.trailing_stops:
+            del self.trailing_stops[symbol]
+
+    def get_leverage(self, data: pd.DataFrame) -> float:
+        """
+        Get leverage for the current trade. Override for dynamic leverage.
+
+        Args:
+            data: DataFrame with current market data
+
+        Returns:
+            Leverage multiplier (1.0 = no leverage)
+        """
+        return self.leverage
+
+    def update_trailing_stop(
+        self,
+        symbol: str,
+        current_price: float,
+        entry_price: float,
+        position_type: str = "LONG"
+    ) -> Optional[float]:
+        """
+        Update trailing stop and return current stop price.
+
+        Args:
+            symbol: Trading symbol
+            current_price: Current price
+            entry_price: Entry price of position
+            position_type: "LONG" or "SHORT"
+
+        Returns:
+            Current stop price, or None if not set
+        """
+        if symbol not in self.trailing_stops:
+            return None
+
+        stop_info = self.trailing_stops[symbol]
+
+        if position_type == "LONG":
+            # Update highest price
+            if current_price > stop_info.get("highest_price", entry_price):
+                stop_info["highest_price"] = current_price
+        else:  # SHORT
+            # Update lowest price for shorts
+            if current_price < stop_info.get("lowest_price", entry_price):
+                stop_info["lowest_price"] = current_price
+
+        return stop_info.get("stop_price")
+
+    def init_trailing_stop(
+        self,
+        symbol: str,
+        entry_price: float,
+        initial_stop_pct: float,
+        position_type: str = "LONG"
+    ):
+        """
+        Initialize trailing stop for a position.
+
+        Args:
+            symbol: Trading symbol
+            entry_price: Entry price
+            initial_stop_pct: Initial stop loss percentage (e.g., 0.02 for 2%)
+            position_type: "LONG" or "SHORT"
+        """
+        if position_type == "LONG":
+            stop_price = entry_price * (1 - initial_stop_pct)
+            self.trailing_stops[symbol] = {
+                "stop_price": stop_price,
+                "highest_price": entry_price,
+                "activated": False,
+                "initial_stop_pct": initial_stop_pct
+            }
+        else:  # SHORT
+            stop_price = entry_price * (1 + initial_stop_pct)
+            self.trailing_stops[symbol] = {
+                "stop_price": stop_price,
+                "lowest_price": entry_price,
+                "activated": False,
+                "initial_stop_pct": initial_stop_pct
+            }
+
+    def is_in_session(self, timestamp: pd.Timestamp, sessions: list[tuple[int, int]]) -> bool:
+        """
+        Check if timestamp is within allowed trading sessions.
+
+        Args:
+            timestamp: Current timestamp
+            sessions: List of (start_hour, end_hour) tuples in UTC
+
+        Returns:
+            True if within a trading session
+        """
+        hour = timestamp.hour
+        for start_hour, end_hour in sessions:
+            if start_hour <= end_hour:
+                if start_hour <= hour < end_hour:
+                    return True
+            else:  # Crosses midnight
+                if hour >= start_hour or hour < end_hour:
+                    return True
+        return False
